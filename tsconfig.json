@@ -5,12 +5,12 @@
     "moduleResolution": "Bundler",
     "strict": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
 
-    "rootDir": "./src",
-    "outDir": "./dist",
+    "rootDir": "src",
+    "outDir": "dist",
 
-    "noEmit": true
+    "declaration": true,
+    "sourceMap": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "test/vaults.test.ts"]
+  "include": ["src/**/*.ts"]
 }

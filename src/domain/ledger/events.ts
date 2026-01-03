@@ -27,8 +27,8 @@ export type DomainEvent =
   | {
       type: "VAULT_WITHDRAWN";
       vaultId: VaultId;
-      amountCents: Cents;   // gross withdrawn
-      penaltyCents: Cents;  // discipline/platform fee
+      amountCents: Cents; // gross withdrawn
+      penaltyCents: Cents; // discipline/platform fee
       date: ISODate;
     }
 
@@ -64,6 +64,29 @@ export type DomainEvent =
     }
 
   // ─────────────────────────────────────────
+  // Debt lifecycle
+  // ─────────────────────────────────────────
+  | {
+      type: "DEBT_CREATED";
+      debtId: string;
+      userId: string;
+      name: string;
+      minimumPaymentCents?: Cents;
+      balanceCents: Cents;
+      date: ISODate;
+    }
+  | {
+      type: "DEBT_PAYMENT_APPLIED";
+      debtId: string;
+      amountCents: Cents;
+      date: ISODate;
+      meta?: {
+        source: "GHOST_PAY" | "GHOST_SPLIT_PAY" | "MANUAL";
+        transferId?: string;
+      };
+    }
+
+  // ─────────────────────────────────────────
   // Transfer intents + outcomes (real money boundary)
   // ─────────────────────────────────────────
   | {
@@ -73,7 +96,12 @@ export type DomainEvent =
       fromAccountId: string;
       toAccountId: string;
       amountCents: Cents;
-      reason: "VAULT_DEPOSIT" | "VAULT_WITHDRAW" | "CHALLENGE_WEEKLY_AUTO_WITHDRAW";
+      reason:
+        | "VAULT_DEPOSIT"
+        | "VAULT_WITHDRAW"
+        | "CHALLENGE_WEEKLY_AUTO_WITHDRAW"
+        | "GHOST_DEBT_PAY"
+        | "GHOST_DEBT_SPLIT_PAY";
       date: ISODate;
     }
   | {
@@ -89,11 +117,3 @@ export type DomainEvent =
       message: string;
       date: ISODate;
     };
-    type DebtPaymentApplied = {
-        type: "DEBT_PAYMENT_APPLIED";
-        debtId: string;
-        amountCents: number;
-        date: string;
-        meta?: { source?: string; transferId?: string };
-      };
-      

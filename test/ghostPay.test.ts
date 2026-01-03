@@ -3,7 +3,6 @@ import { replay } from "../src/domain/ledger/reducer.js";
 import { money } from "../src/domain/shared/money.js";
 
 // Import your debt creation command(s)
-// CHANGE THESE to match your project:
 import { createDebtEvents } from "../src/domain/commands/debtCommands.js";
 
 import {
@@ -15,11 +14,15 @@ describe("Ghost Pay (single-target)", () => {
   it("does not change debt until transfer succeeds, then applies payment", () => {
     // Arrange: 1 debt with $5 balance (500 cents)
     let events = [
-      // CHANGE THIS to whatever your debt creation command is:
-      ...createDebtEvents("d1", {
-        name: "Card",
-        balanceCents: money.fromDollars(5)
-      }, "2026-01-01")
+      ...createDebtEvents(
+        "u1",
+        "d1",
+        {
+          name: "Card",
+          balanceCents: money.fromDollars(5)
+        },
+        "2026-01-01"
+      )
     ];
 
     const before = replay(events);
@@ -73,10 +76,15 @@ describe("Ghost Pay (single-target)", () => {
 
   it("idempotency: cannot apply ghost pay success twice", () => {
     let events = [
-      ...createDebtEvents("d2", {
-        name: "Loan",
-        balanceCents: money.fromDollars(5)
-      }, "2026-01-01")
+      ...createDebtEvents(
+        "u1",
+        "d2",
+        {
+          name: "Loan",
+          balanceCents: money.fromDollars(5)
+        },
+        "2026-01-01"
+      )
     ];
 
     events = events.concat(
@@ -112,10 +120,15 @@ describe("Ghost Pay (single-target)", () => {
 
   it("does not overpay a debt (caps to remaining)", () => {
     let events = [
-      ...createDebtEvents("d3", {
-        name: "Tiny",
-        balanceCents: 50
-      }, "2026-01-01")
+      ...createDebtEvents(
+        "u1",
+        "d3",
+        {
+          name: "Tiny",
+          balanceCents: 50
+        },
+        "2026-01-01"
+      )
     ];
 
     events = events.concat(

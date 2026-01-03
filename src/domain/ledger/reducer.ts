@@ -12,6 +12,18 @@ type TransferReason =
   | "GHOST_DEBT_PAY"
   | "GHOST_DEBT_SPLIT_PAY";
 
+/**
+ * Tests expect debts[id].balanceCents to exist.
+ * Some tests/fallback code also checks debts[id].remainingCents.
+ *
+ * We keep debtBalances as the source-of-truth, but we also store a "view"
+ * object in debts that includes balanceCents (and remainingCents alias).
+ */
+type DebtView = Omit<Debt, "balanceCents"> & {
+  balanceCents: Cents;
+  remainingCents: Cents;
+};
+
 export type DomainState = {
   vaults: Record<string, Omit<Vault, "balanceCents">>;
   vaultBalances: Record<string, Cents>;
@@ -19,8 +31,8 @@ export type DomainState = {
   challenges: Record<string, Omit<Challenge, "totalSavedCents">>;
   challengeTotals: Record<string, Cents>;
 
-  // ✅ NEW: debts
-  debts: Record<string, Omit<Debt, "balanceCents">>;
+  // ✅ FIX: debts now include balanceCents + remainingCents so tests compile
+  debts: Record<string, DebtView>;
   debtBalances: Record<string, Cents>;
 
   transfers: Record<
@@ -57,7 +69,6 @@ function ensureChallenge(state: DomainState, challengeId: string): void {
   }
 }
 
-// ✅ NEW
 function ensureDebt(state: DomainState, debtId: string): void {
   if (!state.debts[debtId] || state.debtBalances[debtId] === undefined) {
     throw new Error(`Debt not found in state: ${debtId}`);
@@ -68,44 +79,6 @@ function ensureTransfer(state: DomainState, transferId: string): void {
   if (!state.transfers[transferId]) {
     throw new Error(`Transfer not found in state: ${transferId}`);
   }
-}
-
-/**
- * Keep state.debts[*] and state.debtBalances in sync for callers/tests.
- * Tests (and some UI) expect debts[id].balanceCents to exist.
- * Source-of-truth remains debtBalances, but we mirror it onto the debt object.
- */
-function mirrorDebtBalances(state: DomainState): DomainState {
-  const debtIds = Object.keys(state.debts);
-  if (!debtIds.length) return state;
-
-  let changed = false;
-  const nextDebts: DomainState["debts"] = { ...state.debts };
-
-  for (const debtId of debtIds) {
-    const bal = state.debtBalances?.[debtId];
-    const d: any = nextDebts[debtId];
-    if (!d) continue;
-
-    // If we have a balance entry, ensure debts[*].balanceCents matches it.
-    if (typeof bal === "number") {
-      if (d.balanceCents !== bal) {
-        nextDebts[debtId] = { ...d, balanceCents: bal };
-        changed = true;
-      }
-      continue;
-    }
-
-    // Fallback: if reducer was given a debt without a balance entry somehow,
-    // try to keep a numeric balanceCents present if remainingCents exists.
-    const fallback = d.balanceCents ?? d.remainingCents;
-    if (typeof fallback === "number" && d.balanceCents !== fallback) {
-      nextDebts[debtId] = { ...d, balanceCents: fallback };
-      changed = true;
-    }
-  }
-
-  return changed ? { ...state, debts: nextDebts } : state;
 }
 
 export function applyEvent(state: DomainState, event: DomainEvent): DomainState {
@@ -210,41 +183,47 @@ export function applyEvent(state: DomainState, event: DomainEvent): DomainState 
     // ✅ Debts
     // ─────────────────────────────────────────
     case "DEBT_CREATED": {
-      // Store non-balance fields in debts, and balance in debtBalances,
-      // but also mirror balanceCents onto the debt object so callers/tests
-      // can rely on debts[id].balanceCents existing.
-      const baseDebt = {
+      const view: DebtView = {
         id: event.debtId,
         name: event.name,
-        minimumPaymentCents: event.minimumPaymentCents ?? 0
+        minimumPaymentCents: event.minimumPaymentCents ?? 0,
+        balanceCents: event.balanceCents,
+        remainingCents: event.balanceCents
       };
 
-      return mirrorDebtBalances({
+      return {
         ...state,
         debts: {
           ...state.debts,
-          [event.debtId]: { ...baseDebt, balanceCents: event.balanceCents } as any
+          [event.debtId]: view
         },
         debtBalances: {
           ...state.debtBalances,
           [event.debtId]: event.balanceCents
         }
-      });
+      };
     }
 
     case "DEBT_PAYMENT_APPLIED": {
       ensureDebt(state, event.debtId);
       const current = state.debtBalances[event.debtId];
+      const nextBal = money.sub(current, event.amountCents);
 
-      const next = {
+      return {
         ...state,
         debtBalances: {
           ...state.debtBalances,
-          [event.debtId]: money.sub(current, event.amountCents)
+          [event.debtId]: nextBal
+        },
+        debts: {
+          ...state.debts,
+          [event.debtId]: {
+            ...state.debts[event.debtId],
+            balanceCents: nextBal,
+            remainingCents: nextBal
+          }
         }
       };
-
-      return mirrorDebtBalances(next);
     }
 
     // ─────────────────────────────────────────
@@ -296,7 +275,5 @@ export function applyEvent(state: DomainState, event: DomainEvent): DomainState 
 }
 
 export function replay(events: DomainEvent[]): DomainState {
-  // Reduce events then ensure a final sync so debts[*].balanceCents is always present.
-  const state = events.reduce(applyEvent, emptyState());
-  return mirrorDebtBalances(state);
+  return events.reduce(applyEvent, emptyState());
 }

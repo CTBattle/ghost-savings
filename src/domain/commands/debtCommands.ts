@@ -8,6 +8,7 @@ import type { Cents } from "../shared/money.js";
  *   events = [...events, ...createDebtEvents(...)]
  */
 export function createDebtEvents(
+  userId: string,
   debtId: string,
   params: {
     name: string;
@@ -19,6 +20,7 @@ export function createDebtEvents(
   return [
     {
       type: "DEBT_CREATED",
+      userId,
       debtId,
       name: params.name,
       balanceCents: params.balanceCents,

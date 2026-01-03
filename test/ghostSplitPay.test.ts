@@ -13,9 +13,9 @@ describe("Ghost Split Pay (multi-target)", () => {
   it("does not change debts until transfers succeed, then applies split payments", () => {
     // 3 debts: 500, 500, 500
     let events = [
-      ...createDebtEvents("d1", { name: "Card", balanceCents: money.fromDollars(5) }, "2026-01-01"),
-      ...createDebtEvents("d2", { name: "Loan", balanceCents: money.fromDollars(5) }, "2026-01-01"),
-      ...createDebtEvents("d3", { name: "Car",  balanceCents: money.fromDollars(5) }, "2026-01-01")
+      ...createDebtEvents("u1", "d1", { name: "Card", balanceCents: money.fromDollars(5) }, "2026-01-01"),
+      ...createDebtEvents("u1", "d2", { name: "Loan", balanceCents: money.fromDollars(5) }, "2026-01-01"),
+      ...createDebtEvents("u1", "d3", { name: "Car",  balanceCents: money.fromDollars(5) }, "2026-01-01")
     ];
 
     // split $10 across 3 => 334,333,333 cents
@@ -74,7 +74,7 @@ describe("Ghost Split Pay (multi-target)", () => {
 
   it("idempotency: cannot apply split success twice for the same transfer", () => {
     let events = [
-      ...createDebtEvents("d1", { name: "Card", balanceCents: money.fromDollars(5) }, "2026-01-01")
+      ...createDebtEvents("u1", "d1", { name: "Card", balanceCents: money.fromDollars(5) }, "2026-01-01")
     ];
 
     events = events.concat(
@@ -110,8 +110,8 @@ describe("Ghost Split Pay (multi-target)", () => {
 
   it("does not overpay: caps each transfer to remaining", () => {
     let events = [
-      ...createDebtEvents("d1", { name: "Tiny", balanceCents: 50 }, "2026-01-01"),
-      ...createDebtEvents("d2", { name: "Other", balanceCents: 50 }, "2026-01-01")
+      ...createDebtEvents("u1", "d1", { name: "Tiny", balanceCents: 50 }, "2026-01-01"),
+      ...createDebtEvents("u1", "d2", { name: "Other", balanceCents: 50 }, "2026-01-01")
     ];
 
     // total 400 cents across 2 => 200/200, but each debt only has 50 remaining

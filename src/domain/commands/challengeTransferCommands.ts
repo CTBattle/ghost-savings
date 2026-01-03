@@ -2,10 +2,13 @@ import type { DomainEvent } from "../ledger/events.js";
 import { replay } from "../ledger/reducer.js";
 import type { ISODate } from "../shared/dates.js";
 import type { Cents } from "../shared/money.js";
-import { applyAutoWithdrawSuccess, failMissedWithdraw } from "../challenges/engine.js";
+import {
+  requiredWeeklyAmountCents,
+  applyAutoWithdrawSuccess,
+  failMissedWithdraw
+} from "../challenges/engine.js";
 
 function percentOfCents(amount: Cents, percent: number): Cents {
-  // integer-safe: amount * percent / 100
   return Math.floor((amount * percent) / 100);
 }
 
@@ -20,7 +23,7 @@ export function requestChallengeWeeklyTransfer(
     userId: string;
     challengeId: string;
     fromAccountId: string; // user bank account
-    toAccountId: string;   // holding / internal account
+    toAccountId: string; // holding / internal account
     date: ISODate;
   }
 ): DomainEvent[] {
@@ -32,8 +35,9 @@ export function requestChallengeWeeklyTransfer(
   if (ch.status !== "ACTIVE") throw new Error("Challenge is not active.");
   if (ch.weekIndex >= 52) throw new Error("Challenge is completed.");
 
+  // For REQUEST we only need the amount — compute it directly.
   const full = { ...ch, totalSavedCents: total };
-  const { event } = applyAutoWithdrawSuccess(full, params.date);
+  const amountCents = requiredWeeklyAmountCents(full);
 
   return [
     {
@@ -42,7 +46,7 @@ export function requestChallengeWeeklyTransfer(
       userId: params.userId,
       fromAccountId: params.fromAccountId,
       toAccountId: params.toAccountId,
-      amountCents: event.amountCents,
+      amountCents,
       reason: "CHALLENGE_WEEKLY_AUTO_WITHDRAW",
       date: params.date
     }
@@ -76,7 +80,12 @@ export function applyChallengeWeeklyAfterTransferSuccess(
   if (ch.weekIndex >= 52) throw new Error("Challenge is completed.");
 
   const full = { ...ch, totalSavedCents: total };
-  const { challenge, event } = applyAutoWithdrawSuccess(full, params.date);
+
+  // Compute amount deterministically from current week state.
+  const amountCents = requiredWeeklyAmountCents(full);
+
+  // Engine advances week / may mark completed.
+  const { challenge } = applyAutoWithdrawSuccess(full, params.date);
 
   return [
     {
@@ -88,7 +97,7 @@ export function applyChallengeWeeklyAfterTransferSuccess(
     {
       type: "CHALLENGE_WEEK_SUCCESS",
       challengeId: params.challengeId,
-      amountCents: event.amountCents,
+      amountCents,
       weekIndex: challenge.weekIndex - 1,
       date: params.date
     }
@@ -140,34 +149,32 @@ export function applyChallengeWeeklyAfterTransferFail(
   const { event } = failMissedWithdraw(full, params.date);
   if (event.type !== "AUTO_WITHDRAW_MISSED_FAIL") throw new Error("Unexpected event type.");
 
-  const weeklyFailed: DomainEvent = {
-    type: "TRANSFER_FAILED",
-    transferId: params.transferId,
-    errorCode: params.errorCode,
-    message: params.message,
-    date: params.date
-  };
-
-  const challengeFailed: DomainEvent = {
-    type: "CHALLENGE_FAILED",
-    challengeId: params.challengeId,
-    penaltyCents: event.penaltyCents,
-    redirectedToVaultCents: event.redirectedToVaultCents,
-    date: params.date
-  };
-
-  const redirectRequested: DomainEvent = {
-    type: "TRANSFER_REQUESTED",
-    transferId: params.redirectTransferId,
-    userId: params.userId,
-    fromAccountId: params.redirectFromAccountId,
-    toAccountId: params.redirectToAccountId,
-    amountCents: event.redirectedToVaultCents,
-    reason: "VAULT_DEPOSIT",
-    date: params.date
-  };
-
-  return [weeklyFailed, challengeFailed, redirectRequested];
+  return [
+    {
+      type: "TRANSFER_FAILED",
+      transferId: params.transferId,
+      errorCode: params.errorCode,
+      message: params.message,
+      date: params.date
+    },
+    {
+      type: "CHALLENGE_FAILED",
+      challengeId: params.challengeId,
+      penaltyCents: event.penaltyCents,
+      redirectedToVaultCents: event.redirectedToVaultCents,
+      date: params.date
+    },
+    {
+      type: "TRANSFER_REQUESTED",
+      transferId: params.redirectTransferId,
+      userId: params.userId,
+      fromAccountId: params.redirectFromAccountId,
+      toAccountId: params.redirectToAccountId,
+      amountCents: event.redirectedToVaultCents,
+      reason: "VAULT_DEPOSIT",
+      date: params.date
+    }
+  ];
 }
 
 /**
@@ -202,26 +209,25 @@ export function applyChallengeQuit(
   const penaltyCents = percentOfCents(total, 5);
   const redirectedToVaultCents = (total - penaltyCents) as Cents;
 
-  const quitEvent: DomainEvent = {
-    type: "CHALLENGE_QUIT",
-    challengeId: params.challengeId,
-    penaltyCents,
-    redirectedToVaultCents,
-    date: params.date
-  };
-
-  const redirectRequested: DomainEvent = {
-    type: "TRANSFER_REQUESTED",
-    transferId: params.redirectTransferId,
-    userId: params.userId,
-    fromAccountId: params.redirectFromAccountId,
-    toAccountId: params.redirectToAccountId,
-    amountCents: redirectedToVaultCents,
-    reason: "VAULT_DEPOSIT",
-    date: params.date
-  };
-
-  return [quitEvent, redirectRequested];
+  return [
+    {
+      type: "CHALLENGE_QUIT",
+      challengeId: params.challengeId,
+      penaltyCents,
+      redirectedToVaultCents,
+      date: params.date
+    },
+    {
+      type: "TRANSFER_REQUESTED",
+      transferId: params.redirectTransferId,
+      userId: params.userId,
+      fromAccountId: params.redirectFromAccountId,
+      toAccountId: params.redirectToAccountId,
+      amountCents: redirectedToVaultCents,
+      reason: "VAULT_DEPOSIT",
+      date: params.date
+    }
+  ];
 }
 
 /**

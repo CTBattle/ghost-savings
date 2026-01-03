@@ -5,10 +5,7 @@ import { requiredWeeklyAmountCents } from "../challenges/engine.js";
 /**
  * Returns the challenge entity or null if missing.
  */
-export function selectChallenge(
-  events: DomainEvent[],
-  challengeId: string
-) {
+export function selectChallenge(events: DomainEvent[], challengeId: string) {
   const state = replay(events);
   return state.challenges[challengeId] ?? null;
 }
@@ -29,7 +26,9 @@ export function selectChallengeNextRequiredAmount(
   if (ch.status !== "ACTIVE") return null;
   if (ch.weekIndex >= 52) return null;
 
-  return requiredWeeklyAmountCents(ch);
+  // ✅ Engine helper expects totalSavedCents on Challenge
+  const full = { ...ch, totalSavedCents: total };
+  return requiredWeeklyAmountCents(full);
 }
 
 /**
@@ -37,35 +36,35 @@ export function selectChallengeNextRequiredAmount(
  */
 export function selectPendingTransfers(events: DomainEvent[]) {
   const state = replay(events);
-  return Object.values(state.transfers).filter(
-    (t) => t.status === "REQUESTED"
-  );
+  return Object.values(state.transfers).filter((t) => t.status === "REQUESTED");
 }
 
 export function selectChallengeSummary(
-    events: DomainEvent[],
-    challengeId: string
-  ): {
-    challenge: unknown;
-    status: string;
-    weekIndex: number;
-    totalSavedCents: number;
-    nextRequiredCents: number | null;
-  } | null {
-    const state = replay(events);
-    const ch = state.challenges[challengeId];
-    const total = state.challengeTotals[challengeId];
-  
-    if (!ch || total === undefined) return null;
-  
-    const actionable = ch.status === "ACTIVE" && ch.weekIndex < 52;
-  
-    return {
-      challenge: ch,
-      status: ch.status,
-      weekIndex: ch.weekIndex,
-      totalSavedCents: total,
-      nextRequiredCents: actionable ? requiredWeeklyAmountCents(ch) : null
-    };
-  }
-  
+  events: DomainEvent[],
+  challengeId: string
+): {
+  challenge: unknown;
+  status: string;
+  weekIndex: number;
+  totalSavedCents: number;
+  nextRequiredCents: number | null;
+} | null {
+  const state = replay(events);
+  const ch = state.challenges[challengeId];
+  const total = state.challengeTotals[challengeId];
+
+  if (!ch || total === undefined) return null;
+
+  const actionable = ch.status === "ACTIVE" && ch.weekIndex < 52;
+
+  // ✅ Engine helper expects totalSavedCents on Challenge
+  const full = { ...ch, totalSavedCents: total };
+
+  return {
+    challenge: ch,
+    status: ch.status,
+    weekIndex: ch.weekIndex,
+    totalSavedCents: total,
+    nextRequiredCents: actionable ? requiredWeeklyAmountCents(full) : null
+  };
+}
