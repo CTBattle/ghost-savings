@@ -16,6 +16,12 @@ import type { VaultKind } from "../domain/vaults/types.js";
 import { loadEventsFromDisk, saveEventsToDisk } from "./eventStoreFile.js";
 import { replay } from "../domain/ledger/reducer.js";
 
+import {
+  loadIdempotencyStore,
+  getIdempotentResponse,
+  setIdempotentResponse,
+} from "./idempotencyFile.js";
+
 const app = Fastify({ logger: true });
 
 /**
@@ -87,6 +93,19 @@ const eventStore: DomainEvent[] = loaded.length > 0 ? loaded : seededEvents;
 
 if (loaded.length === 0) {
   saveEventsToDisk(eventStore);
+}
+
+/**
+ * Persistent idempotency store (file-backed).
+ * Used ONLY when client provides Idempotency-Key header.
+ */
+const idemStore = loadIdempotencyStore();
+
+function getIdemKey(req: any): string | null {
+  // Fastify lower-cases incoming header names
+  const raw = req.headers?.["idempotency-key"];
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  return null;
 }
 
 /**
@@ -317,14 +336,13 @@ app.post<{
 /**
  * PREVIEW: Ghost Pay (no events appended)
  * POST /ghost-pay/preview
- * body: { userId, vaultId, debtId, amountCents, date? }
  */
 app.post<{
   Body: {
     userId: string;
     vaultId: string;
     debtId: string;
-    amountCents: number; // cents
+    amountCents: number;
     date?: string;
   };
 }>("/ghost-pay/preview", async (req, reply) => {
@@ -413,14 +431,13 @@ app.post<{
 /**
  * PREVIEW: Ghost Split Pay (no events appended)
  * POST /ghost-split-pay/preview
- * body: { userId, vaultId, debtIds, amountCents, date? }
  */
 app.post<{
   Body: {
     userId: string;
     vaultId: string;
     debtIds: string[];
-    amountCents: number; // cents
+    amountCents: number;
     date?: string;
   };
 }>("/ghost-split-pay/preview", async (req, reply) => {
@@ -569,6 +586,13 @@ app.post<{
 
   const isoDate = (date ?? new Date().toISOString().slice(0, 10)) as any;
 
+  // ✅ idempotency (if provided)
+  const idemKey = getIdemKey(req);
+  if (idemKey) {
+    const cached = getIdempotentResponse(idemStore, `ghost-pay:${idemKey}`);
+    if (cached) return reply.send(cached);
+  }
+
   // Compute current balances from event-sourced state
   const state = replay(eventStore);
 
@@ -656,7 +680,7 @@ app.post<{
   const nextVaultBal = after.vaultBalances[vaultId] ?? 0;
   const nextDebtBal = after.debtBalances[debtId] ?? 0;
 
-  // ✅ totals/clampReason for REAL route (parity with preview)
+  // totals/clampReason (parity with preview)
   let clampReason: null | "VAULT_BALANCE" | "DEBT_REMAINING" | "REQUESTED_ZERO" =
     null;
   if (requested <= 0) clampReason = "REQUESTED_ZERO";
@@ -665,7 +689,7 @@ app.post<{
     else if (payCents === debtBal) clampReason = "DEBT_REMAINING";
   }
 
-  return reply.send({
+  const payload = {
     ok: true,
     date: isoDate,
     userId,
@@ -700,7 +724,11 @@ app.post<{
 
     appended: newEvents.length,
     count: eventStore.length,
-  });
+  };
+
+  if (idemKey) setIdempotentResponse(idemStore, `ghost-pay:${idemKey}`, payload);
+
+  return reply.send(payload);
 });
 
 /**
@@ -735,6 +763,13 @@ app.post<{
   }
 
   const isoDate = (date ?? new Date().toISOString().slice(0, 10)) as any;
+
+  // ✅ idempotency (if provided)
+  const idemKey = getIdemKey(req);
+  if (idemKey) {
+    const cached = getIdempotentResponse(idemStore, `ghost-split-pay:${idemKey}`);
+    if (cached) return reply.send(cached);
+  }
 
   // Event-sourced state
   const state = replay(eventStore);
@@ -837,7 +872,7 @@ app.post<{
     debtRemainingCents[a.debtId] = after.debtBalances[a.debtId] ?? 0;
   }
 
-  // ✅ totals/clampReason for REAL route (parity with preview)
+  // totals/clampReason (parity with preview)
   let clampReason: null | "VAULT_BALANCE" | "TOTAL_REMAINING" | "REQUESTED_ZERO" =
     null;
   if (requested <= 0) clampReason = "REQUESTED_ZERO";
@@ -851,7 +886,7 @@ app.post<{
   );
   const debtRemainingAfterCents = debtRemainingCents;
 
-  return reply.send({
+  const payload = {
     ok: true,
     date: isoDate,
     userId,
@@ -885,7 +920,13 @@ app.post<{
 
     appended: newEvents.length,
     count: eventStore.length,
-  });
+  };
+
+  if (idemKey) {
+    setIdempotentResponse(idemStore, `ghost-split-pay:${idemKey}`, payload);
+  }
+
+  return reply.send(payload);
 });
 
 const port = Number(process.env.PORT ?? 3000);
