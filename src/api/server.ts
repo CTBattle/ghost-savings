@@ -1,3 +1,4 @@
+import "dotenv/config";
 import Fastify from "fastify";
 
 import type { DomainEvent } from "../domain/ledger/events.js";
@@ -22,7 +23,18 @@ import {
   setIdempotentResponse,
 } from "./idempotencyFile.js";
 
+import { plaid } from "../infra/plaid/plaidClient.js";
+
+import type { Products, CountryCode } from "plaid";
+import { upsertPlaidToken, getPlaidToken } from "./plaidTokenFile.js";
+
 const app = Fastify({ logger: true });
+
+// DEV ONLY: in-memory token store (replace with DB later)
+const plaidStore = {
+  accessTokenByUserId: new Map<string, string>(),
+  itemIdByUserId: new Map<string, string>(),
+};
 
 /**
  * API-level vault kind input (simple strings from client).
@@ -155,6 +167,148 @@ app.get("/health", async () => {
 // Simple ping endpoint (nice for mobile reachability checks)
 app.get("/ping", async () => {
   return { ok: true, ts: new Date().toISOString() };
+});
+
+/**
+ * Plaid: create link_token
+ * POST /plaid/link-token
+ */
+app.post("/plaid/link-token", async (req, reply) => {
+  try {
+    const resp = await plaid.linkTokenCreate({
+      user: { client_user_id: "default" },
+      client_name: "Ghost Savings",
+      products: ["transactions"] as Products[],
+      country_codes: ["US"] as CountryCode[],
+      language: "en",
+      // redirect_uri intentionally omitted for sandbox unless configured in Plaid dashboard
+    });
+
+    return reply.send({
+      ok: true,
+      link_token: resp.data.link_token,
+    });
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid linkTokenCreate failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_LINK_TOKEN_CREATE_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
+});
+
+
+/**
+ * Plaid: exchange public_token -> access_token
+ * POST /plaid/exchange-token
+ * body: { public_token: string }
+ */
+app.post<{
+  Body: { public_token: string };
+}>("/plaid/exchange-token", async (req, reply) => {
+  try {
+
+    const { public_token } = req.body ?? ({} as any);
+
+    if (!public_token || typeof public_token !== "string") {
+      return reply.status(400).send({
+        ok: false,
+        error: "public_token is required",
+      });
+    }
+
+    const resp = await plaid.itemPublicTokenExchange({ public_token });
+
+    const userId = "u1"; // TODO: replace with real signed-in user id later
+
+    plaidStore.accessTokenByUserId.set(userId, resp.data.access_token);
+plaidStore.itemIdByUserId.set(userId, resp.data.item_id);
+upsertPlaidToken(userId, {
+  access_token: resp.data.access_token,
+  item_id: resp.data.item_id,
+});
+
+return reply.send({
+  ok: true,
+  userId,
+  access_token: resp.data.access_token,
+  item_id: resp.data.item_id,
+});
+
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid itemPublicTokenExchange failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_PUBLIC_TOKEN_EXCHANGE_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
+});
+/**
+ * Plaid: fetch accounts for the current dev user
+ * GET /plaid/accounts
+ */
+app.get("/plaid/accounts", async (req, reply) => {
+  try {
+    const userId = "u1"; // TEMP: replace with real auth later
+    let access_token = plaidStore.accessTokenByUserId.get(userId);
+
+    if (!access_token) {
+      const saved = getPlaidToken(userId);
+      if (saved?.access_token) {
+        access_token = saved.access_token;
+    
+        // warm in-memory cache too
+        plaidStore.accessTokenByUserId.set(userId, saved.access_token);
+        plaidStore.itemIdByUserId.set(userId, saved.item_id);
+      }
+    }
+    if (!access_token) {
+      return reply.status(400).send({
+        ok: false,
+        error: "NO_PLAID_ACCESS_TOKEN",
+        message: "No access token stored. Complete Plaid Link + exchange-token first.",
+      });
+    }
+    
+    const resp = await plaid.accountsGet({ access_token });
+
+    const accounts = resp.data.accounts.map((a) => ({
+      account_id: a.account_id,
+      name: a.name,
+      official_name: a.official_name ?? null,
+      type: a.type,
+      subtype: a.subtype ?? null,
+      mask: a.mask ?? null,
+      balances: {
+        available: a.balances.available ?? null,
+        current: a.balances.current ?? null,
+        iso_currency_code: a.balances.iso_currency_code ?? null,
+        unofficial_currency_code: a.balances.unofficial_currency_code ?? null,
+      },
+    }));
+
+    return reply.send({
+      ok: true,
+      userId,
+      item_id: plaidStore.itemIdByUserId.get(userId) ?? null,
+      accounts,
+    });
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid accountsGet failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_ACCOUNTS_GET_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
 });
 
 // Dashboard read model (derived from ALL events)
@@ -788,8 +942,11 @@ app.post<{
       .send({ ok: false, error: `Vault ${vaultId} has no funds.` });
   }
 
+  // ✅ dedupe debt ids (prevents weird “double pay” if client sends duplicates)
+  const uniqueDebtIds = Array.from(new Set(debtIds));
+
   // Validate debts exist
-  const missing = debtIds.filter((id) => state.debts[id] == null);
+  const missing = uniqueDebtIds.filter((id) => state.debts[id] == null);
   if (missing.length > 0) {
     return reply.status(404).send({
       ok: false,
@@ -798,7 +955,7 @@ app.post<{
   }
 
   // Only pay debts that still have remaining > 0
-  const payable = debtIds
+  const payable = uniqueDebtIds
     .map((id) => ({
       debtId: id,
       remainingCents: state.debtBalances[id] ?? 0,
@@ -822,6 +979,8 @@ app.post<{
 
   const allocations = buildAllocations(payTotal, payable);
   const allocatedTotal = allocations.reduce((s, a) => s + a.amountCents, 0);
+  // ^^^ BUG FIX NOTE: If you see a TypeScript error here, replace line above with the correct one below:
+  // const allocatedTotal = allocations.reduce((s, a) => s + a.amountCents, 0);
 
   const transferId = `t${Date.now()}`;
   const providerRef = `sim_${transferId}`;
