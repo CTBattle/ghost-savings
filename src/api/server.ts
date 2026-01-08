@@ -310,6 +310,77 @@ app.get("/plaid/accounts", async (req, reply) => {
     });
   }
 });
+/**
+ * Plaid: fetch transactions for the current dev user
+ * GET /plaid/transactions
+ */
+app.get("/plaid/transactions", async (req, reply) => {
+  try {
+    const userId = "u1"; // TEMP: replace with real auth later
+    let access_token = plaidStore.accessTokenByUserId.get(userId);
+
+    if (!access_token) {
+      const saved = getPlaidToken(userId);
+      if (saved?.access_token) {
+        access_token = saved.access_token;
+
+        // warm in-memory cache too
+        plaidStore.accessTokenByUserId.set(userId, saved.access_token);
+        plaidStore.itemIdByUserId.set(userId, saved.item_id);
+      }
+    }
+
+    if (!access_token) {
+      return reply.status(400).send({
+        ok: false,
+        error: "NO_PLAID_ACCESS_TOKEN",
+        message: "No access token stored. Complete Plaid Link + exchange-token first.",
+      });
+    }
+
+    // last 30 days
+    const end_date = new Date();
+    const start_date = new Date();
+    start_date.setDate(end_date.getDate() - 30);
+
+    const resp = await plaid.transactionsGet({
+      access_token,
+      start_date: start_date.toISOString().slice(0, 10),
+      end_date: end_date.toISOString().slice(0, 10),
+      options: {
+        count: 50,
+        offset: 0,
+      },
+    });
+
+    const transactions = resp.data.transactions.map((t) => ({
+      transaction_id: t.transaction_id,
+      account_id: t.account_id,
+      name: t.name,
+      amount: t.amount,
+      iso_currency_code: t.iso_currency_code,
+      date: t.date,
+      pending: t.pending,
+      category: t.category ?? [],
+    }));
+
+    return reply.send({
+      ok: true,
+      userId,
+      total: resp.data.total_transactions,
+      transactions,
+    });
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid transactionsGet failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_TRANSACTIONS_GET_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
+});
 
 // Dashboard read model (derived from ALL events)
 app.get("/dashboard", async () => {
