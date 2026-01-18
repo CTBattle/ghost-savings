@@ -1,4 +1,6 @@
+import "dotenv/config";
 import Fastify from "fastify";
+
 
 import type { DomainEvent } from "../domain/ledger/events.js";
 import { selectDashboard } from "../domain/readModels/dashboardSelectors.js";
@@ -10,13 +12,83 @@ import {
   catchUpChallengeWeekSuccessEvents,
 } from "../domain/commands/challengeCommands.js";
 
+
 import { money } from "../domain/shared/money.js";
 import type { VaultKind } from "../domain/vaults/types.js";
 
 import { loadEventsFromDisk, saveEventsToDisk } from "./eventStoreFile.js";
 import { replay } from "../domain/ledger/reducer.js";
 
+import {
+  loadIdempotencyStore,
+  getIdempotentResponse,
+  setIdempotentResponse,
+} from "./idempotencyFile.js";
+
+import { plaid } from "../infra/plaid/plaidClient.js";
+
+import type { Products, CountryCode } from "plaid";
+import { upsertPlaidToken, getPlaidToken } from "./plaidTokenFile.js";
+import {
+  getMappedVaultId,
+  upsertPlaidAccountMap,
+  deletePlaidAccountMap,
+} from "./plaidAccountMapFile.js";
+import { getAllPlaidAccountMaps } from "./plaidAccountMapFile.js";
+import { ensurePlaidAccountMapped } from "./plaidMappingService.js";
+import { upsertPlaidTransactions } from "./plaidTransactionsFile.js";
+import { getPlaidTransactionsForUser } from "./plaidTransactionsFile.js";
+import { requireUser } from "../auth/requireUser.js";
+
+
 const app = Fastify({ logger: true });
+
+app.addHook("preHandler", async (req, reply) => {
+  // allow unauthenticated uptime / reachability checks + selected public endpoints
+  const path =
+    (req as any).routerPath ??
+    new URL(req.url, "http://localhost").pathname; // safe parse (handles ?query)
+
+  const publicRoutes = new Set([
+    "GET /health",
+    "GET /ping",
+
+    // Plaid bootstrap routes (make public if your client calls them before auth)
+    "POST /plaid/link-token",
+    "POST /plaid/exchange-public-token",
+
+    // add any other public endpoints here
+  ]);
+
+  const key = `${req.method} ${path}`;
+  if (publicRoutes.has(key)) return;
+
+  await requireUser(req, reply);
+  if ((reply as any).sent) return; // stop if requireUser already replied
+});
+
+
+app.get("/debug/plaid-env", async (req, reply) => {
+  const raw = process.env.PLAID_CLIENT_ID ?? "";
+  const trimmed = raw.trim();
+
+  const toCodes = (s: string) => Array.from(s).map((c) => c.charCodeAt(0));
+
+  return reply.send({
+    rawLen: raw.length,
+    trimmedLen: trimmed.length,
+    rawCodes: toCodes(raw),
+    trimmedCodes: toCodes(trimmed),
+    hasCR: raw.includes("\r"),
+    hasLF: raw.includes("\n"),
+  });
+});
+
+// DEV ONLY: in-memory token store (replace with DB later)
+const plaidStore = {
+  accessTokenByUserId: new Map<string, string>(),
+  itemIdByUserId: new Map<string, string>(),
+};
 
 /**
  * API-level vault kind input (simple strings from client).
@@ -90,6 +162,19 @@ if (loaded.length === 0) {
 }
 
 /**
+ * Persistent idempotency store (file-backed).
+ * Used ONLY when client provides Idempotency-Key header.
+ */
+const idemStore = loadIdempotencyStore();
+
+function getIdemKey(req: any): string | null {
+  // Fastify lower-cases incoming header names
+  const raw = req.headers?.["idempotency-key"];
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  return null;
+}
+
+/**
  * Shared: build allocations (same algorithm as commit route)
  */
 function buildAllocations(
@@ -136,6 +221,619 @@ app.get("/health", async () => {
 // Simple ping endpoint (nice for mobile reachability checks)
 app.get("/ping", async () => {
   return { ok: true, ts: new Date().toISOString() };
+});
+
+/**
+ * Plaid: create link_token
+ * POST /plaid/link-token
+ */
+app.post("/plaid/link-token", async (req, reply) => {
+  try {
+    const resp = await plaid.linkTokenCreate({
+      user: { client_user_id: "default" },
+      client_name: "Ghost Savings",
+      products: ["transactions"] as Products[],
+      country_codes: ["US"] as CountryCode[],
+      language: "en",
+      // redirect_uri intentionally omitted for sandbox unless configured in Plaid dashboard
+    });
+
+    return reply.send({
+      ok: true,
+      link_token: resp.data.link_token,
+    });
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid linkTokenCreate failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_LINK_TOKEN_CREATE_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
+});
+/**
+ * Plaid: exchange public_token -> access_token
+ * POST /plaid/exchange-public-token
+ */
+app.post("/plaid/exchange-public-token", async (req, reply) => {
+  try {
+    const body = (req.body ?? {}) as any;
+    const public_token = body.public_token as string | undefined;
+
+    if (!public_token) {
+      return reply.status(400).send({
+        ok: false,
+        error: "MISSING_PUBLIC_TOKEN",
+      });
+    }
+
+    const resp = await plaid.itemPublicTokenExchange({ public_token });
+
+    // ⚠️ Replace this with your real user id once you wire auth (Firebase idToken -> uid)
+    const userId = "default";
+
+    await upsertPlaidToken(userId, {
+      access_token: resp.data.access_token,
+      item_id: resp.data.item_id,
+      // if your file schema supports it, keep these too:
+      // public_token,
+      // created_at: Date.now(),
+      // env: process.env.PLAID_ENV,
+    } as any);
+
+    return reply.send({
+      ok: true,
+      item_id: resp.data.item_id,
+    });
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid publicTokenExchange failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_PUBLIC_TOKEN_EXCHANGE_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
+});
+
+
+/**
+ * Plaid: exchange public_token -> access_token
+ * POST /plaid/exchange-token
+ * body: { public_token: string }
+ */
+app.post<{
+  Body: { public_token: string };
+}>("/plaid/exchange-token", async (req, reply) => {
+  try {
+
+    const { public_token } = req.body ?? ({} as any);
+
+    if (!public_token || typeof public_token !== "string") {
+      return reply.status(400).send({
+        ok: false,
+        error: "public_token is required",
+      });
+    }
+
+    const resp = await plaid.itemPublicTokenExchange({ public_token });
+
+    const userId = req.user!.uid;
+
+    plaidStore.accessTokenByUserId.set(userId, resp.data.access_token);
+plaidStore.itemIdByUserId.set(userId, resp.data.item_id);
+upsertPlaidToken(userId, {
+  access_token: resp.data.access_token,
+  item_id: resp.data.item_id,
+});
+
+return reply.send({
+  ok: true,
+  userId,
+  access_token: resp.data.access_token,
+  item_id: resp.data.item_id,
+});
+
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid itemPublicTokenExchange failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_PUBLIC_TOKEN_EXCHANGE_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
+});
+/**
+ * Plaid: fetch accounts for the current dev user
+ * GET /plaid/accounts
+ */
+app.get("/plaid/accounts", async (req, reply) => {
+  try {
+    const userId = req.user!.uid;
+    let access_token = plaidStore.accessTokenByUserId.get(userId);
+
+    if (!access_token) {
+      const saved = getPlaidToken(userId);
+      if (saved?.access_token) {
+        access_token = saved.access_token;
+    
+        // warm in-memory cache too
+        plaidStore.accessTokenByUserId.set(userId, saved.access_token);
+        plaidStore.itemIdByUserId.set(userId, saved.item_id);
+      }
+    }
+    if (!access_token) {
+      return reply.status(400).send({
+        ok: false,
+        error: "NO_PLAID_ACCESS_TOKEN",
+        message: "No access token stored. Complete Plaid Link + exchange-token first.",
+      });
+    }
+
+    const resp = await plaid.accountsGet({ access_token });
+
+// AUTO-MAP: ensure every Plaid account has a vault mapping
+for (const a of resp.data.accounts) {
+  ensurePlaidAccountMapped({
+    userId,
+    plaid_account_id: a.account_id,
+    eventStore,
+    save: saveEventsToDisk,
+    nameHint: a.name,
+  });
+}
+
+
+const accounts = resp.data.accounts.map((a) => ({
+  account_id: a.account_id,
+  name: a.name,
+  official_name: a.official_name ?? null,
+  type: a.type,
+  subtype: a.subtype ?? null,
+  mask: a.mask ?? null,
+  balances: {
+    available: a.balances.available ?? null,
+    current: a.balances.current ?? null,
+    iso_currency_code: a.balances.iso_currency_code ?? null,
+    unofficial_currency_code: a.balances.unofficial_currency_code ?? null,
+  },
+}));
+
+return reply.send({
+  ok: true,
+  userId,
+  item_id: plaidStore.itemIdByUserId.get(userId) ?? null,
+  accounts,
+});
+
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid accountsGet failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_ACCOUNTS_GET_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
+});
+/**
+ * Plaid: map a Plaid account to a Ghost Savings vault
+ * POST /plaid/map-account
+ * body: { plaid_account_id: string }
+ */
+app.post<{
+  Body: { plaid_account_id: string };
+}>("/plaid/map-account", async (req, reply) => {
+  try {
+    const { plaid_account_id } = req.body ?? ({} as any);
+
+    if (!plaid_account_id || typeof plaid_account_id !== "string") {
+      return reply.status(400).send({
+        ok: false,
+        error: "plaid_account_id is required",
+      });
+    }
+  
+    // Check if already mapped
+    const userId = req.user!.uid;
+const existingVaultId = getMappedVaultId(userId, plaid_account_id);
+
+    if (existingVaultId) {
+      return reply.send({
+        ok: true,
+        plaid_account_id,
+        vaultId: existingVaultId,
+        mapped: true,
+        message: "Account already mapped",
+      });
+    }
+
+    // Deterministic vault id (stable across restarts)
+    const vaultId = `v_plaid_${plaid_account_id}`;
+
+    const isoDate = new Date().toISOString().slice(0, 10);
+
+    // Create vault events
+    const newEvents = createVaultEvent(
+      vaultId,
+      `Plaid Account ${plaid_account_id.slice(-4)}`,
+      { type: "UNTIL_NEED", createdDate: isoDate as any },
+      isoDate
+    );
+
+    eventStore.push(...newEvents);
+    saveEventsToDisk(eventStore);
+
+    // Persist mapping
+    upsertPlaidAccountMap({
+      userId,
+      plaid_account_id,
+      vault_id: vaultId,
+    });
+    
+
+    return reply.send({
+      ok: true,
+      plaid_account_id,
+      vaultId,
+      mapped: true,
+      appended: newEvents.length,
+      count: eventStore.length,
+    });
+  } catch (err: any) {
+    req.log.error(err, "Plaid map-account failed");
+    return reply.status(500).send({
+      ok: false,
+      error: "PLAID_ACCOUNT_MAP_FAILED",
+    });
+  }
+});
+/**
+ * Plaid: ingest transactions (stores raw txns to disk)
+ * POST /plaid/transactions/ingest
+ * body: { start: "YYYY-MM-DD", end: "YYYY-MM-DD" }
+ */
+app.post<{
+  Body: { start: string; end: string };
+}>("/plaid/transactions/ingest", async (req, reply) => {
+  try {
+    const userId = req.user!.uid;
+
+    let access_token = plaidStore.accessTokenByUserId.get(userId);
+    if (!access_token) {
+      const saved = getPlaidToken(userId);
+      if (saved?.access_token) {
+        access_token = saved.access_token;
+        plaidStore.accessTokenByUserId.set(userId, saved.access_token);
+        plaidStore.itemIdByUserId.set(userId, saved.item_id);
+      }
+    }
+
+    if (!access_token) {
+      return reply.status(400).send({
+        ok: false,
+        error: "NO_PLAID_ACCESS_TOKEN",
+      });
+    }
+
+    const { start, end } = req.body ?? ({} as any);
+    if (!start || !end) {
+      return reply.status(400).send({
+        ok: false,
+        error: "start and end are required",
+      });
+    }
+
+    const resp = await plaid.transactionsGet({
+      access_token,
+      start_date: start,
+      end_date: end,
+      options: { count: 500, offset: 0 },
+    });
+
+    // Ensure mappings exist for any accounts in response
+    for (const a of resp.data.accounts ?? []) {
+      ensurePlaidAccountMapped({
+        userId,
+        plaid_account_id: a.account_id,
+        eventStore,
+        save: saveEventsToDisk,
+        nameHint: a.name,
+      });
+    }
+
+    const { inserted, totalForUser } = upsertPlaidTransactions(
+      userId,
+      resp.data.transactions ?? []
+    );
+
+    return reply.send({
+      ok: true,
+      userId,
+      item_id: plaidStore.itemIdByUserId.get(userId) ?? null,
+      start,
+      end,
+      fetched: resp.data.transactions?.length ?? 0,
+      inserted,
+      totalStoredForUser: totalForUser,
+    });
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid transactions ingest failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_TRANSACTIONS_INGEST_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
+});
+/**
+ * Plaid: apply stored transactions to the event-sourced ledger
+ * POST /plaid/transactions/apply
+ * Optional body: { start?: "YYYY-MM-DD", end?: "YYYY-MM-DD" }
+ */
+app.post<{
+  Body?: { start?: string; end?: string };
+}>("/plaid/transactions/apply", async (req, reply) => {
+  try {
+    const userId = req.user!.uid;
+    const { start, end } = (req.body ?? {}) as any;
+
+    const txns = getPlaidTransactionsForUser(userId);
+
+    // Optional date filtering (Plaid uses txn.date like "2025-12-31")
+    const filtered = txns.filter((t) => {
+      const d = String(t?.date ?? "");
+      if (!d) return false;
+      if (start && d < start) return false;
+      if (end && d > end) return false;
+      return true;
+    });
+
+    let applied = 0;
+    let skipped = 0;
+    let appendedEvents = 0;
+
+    for (const t of filtered) {
+      const transaction_id = t?.transaction_id as string | undefined;
+      const plaid_account_id = t?.account_id as string | undefined;
+      const date = (t?.date as string | undefined) ?? new Date().toISOString().slice(0, 10);
+      const amount = Number(t?.amount);
+
+      if (!transaction_id || !plaid_account_id || !Number.isFinite(amount)) {
+        skipped++;
+        continue;
+      }
+
+      // Ensure we have a vault mapping (or create it)
+      ensurePlaidAccountMapped({
+        userId,
+        plaid_account_id,
+        eventStore,
+        save: saveEventsToDisk,
+        nameHint: null,
+      });
+
+      const vaultId = getMappedVaultId(userId, plaid_account_id);
+      if (!vaultId) {
+        skipped++;
+        continue;
+      }
+
+      // Plaid convention: amount > 0 is usually money OUT (debit), amount < 0 is money IN (credit)
+      const absCents = Math.round(Math.abs(amount) * 100);
+
+      // Ignore $0 txns
+      if (absCents <= 0) {
+        skipped++;
+        continue;
+      }
+
+      // Idempotency: if we already applied this txn, skip it
+      const idKey = `plaid_apply:${userId}:${transaction_id}`;
+      const prior = getIdempotentResponse(idemStore, idKey);
+      if (prior) {
+        skipped++;
+        continue;
+      }
+
+      const transferId = `tr_plaid_${userId}_${transaction_id}`;
+      const externalId = `ext_plaid_${userId}`;
+
+      let fromAccountId: string;
+      let toAccountId: string;
+      let reason: "VAULT_DEPOSIT" | "VAULT_WITHDRAW";
+
+      if (amount > 0) {
+        // debit/outflow -> reduce vault balance
+        fromAccountId = vaultId;
+        toAccountId = externalId;
+        reason = "VAULT_WITHDRAW";
+      } else {
+        // credit/inflow -> increase vault balance
+        fromAccountId = externalId;
+        toAccountId = vaultId;
+        reason = "VAULT_DEPOSIT";
+      }
+
+      // Emit transfer events (cast as any to avoid union strictness friction)
+      const newEvents: DomainEvent[] = [
+        {
+          type: "TRANSFER_REQUESTED",
+          transferId,
+          userId,
+          fromAccountId,
+          toAccountId,
+          amountCents: absCents,
+          reason,
+          date,
+        } as any,
+        {
+          type: "TRANSFER_SUCCEEDED",
+          transferId,
+          date,
+        } as any,
+      ];
+
+      eventStore.push(...newEvents);
+      saveEventsToDisk(eventStore);
+      appendedEvents += newEvents.length;
+
+      setIdempotentResponse(idemStore, idKey, {
+        ok: true,
+        userId,
+        transaction_id,
+        transferId,
+        vaultId,
+        amount,
+        amountCents: absCents,
+        date,
+      });
+      
+
+      applied++;
+    }
+
+    return reply.send({
+      ok: true,
+      userId,
+      considered: filtered.length,
+      applied,
+      skipped,
+      appendedEvents,
+      eventCount: eventStore.length,
+    });
+  } catch (err: any) {
+    req.log.error(err, "Plaid transactions apply failed");
+    return reply.status(500).send({
+      ok: false,
+      error: "PLAID_TRANSACTIONS_APPLY_FAILED",
+      message: err?.message ?? String(err),
+    });
+  }
+});
+
+/**
+ * Plaid: list all Plaid account → vault mappings
+ * GET /plaid/map-accounts
+ */
+app.get("/plaid/map-accounts", async (_req, reply) => {
+  const maps = getAllPlaidAccountMaps();
+
+  return reply.send({
+    ok: true,
+    count: maps.length,
+    mappings: maps,
+  });
+});
+/**
+ * Plaid: unmap a Plaid account from a Ghost Savings vault
+ * DELETE /plaid/map-account/:plaid_account_id
+ */
+app.delete("/plaid/map-account/:plaid_account_id", async (req, reply) => {
+  const userId = req.user!.uid;
+  const { plaid_account_id } = req.params as { plaid_account_id: string };
+
+  if (!plaid_account_id || !plaid_account_id.trim()) {
+    return reply.status(400).send({
+      ok: false,
+      error: "plaid_account_id is required",
+    });
+  }
+
+  const deleted = deletePlaidAccountMap(userId, plaid_account_id);
+
+  if (!deleted) {
+    return reply.status(404).send({
+      ok: false,
+      error: "not mapped",
+      plaid_account_id,
+    });
+  }
+
+  return reply.status(200).send({
+    ok: true,
+    plaid_account_id,
+  });
+});
+
+/**
+ * Plaid: fetch transactions for the current dev user
+ * GET /plaid/transactions
+ */
+app.get("/plaid/transactions", async (req, reply) => {
+  try {
+    const userId = "u1"; // TEMP: replace with real auth later
+    let access_token = plaidStore.accessTokenByUserId.get(userId);
+
+    if (!access_token) {
+      const saved = getPlaidToken(userId);
+      if (saved?.access_token) {
+        access_token = saved.access_token;
+
+        // warm in-memory cache too
+        plaidStore.accessTokenByUserId.set(userId, saved.access_token);
+        plaidStore.itemIdByUserId.set(userId, saved.item_id);
+      }
+    }
+
+    if (!access_token) {
+      return reply.status(400).send({
+        ok: false,
+        error: "NO_PLAID_ACCESS_TOKEN",
+        message: "No access token stored. Complete Plaid Link + exchange-token first.",
+      });
+    }
+
+    // last 30 days
+    const end_date = new Date();
+    const start_date = new Date();
+    start_date.setDate(end_date.getDate() - 30);
+
+    const resp = await plaid.transactionsGet({
+      access_token,
+      start_date: start_date.toISOString().slice(0, 10),
+      end_date: end_date.toISOString().slice(0, 10),
+      options: {
+        count: 50,
+        offset: 0,
+      },
+    });
+
+    const transactions = resp.data.transactions.map((t) => ({
+      transaction_id: t.transaction_id,
+      account_id: t.account_id,
+      name: t.name,
+      amount: t.amount,
+      iso_currency_code: t.iso_currency_code,
+      date: t.date,
+      pending: t.pending,
+      category: t.category ?? [],
+    }));
+
+    return reply.send({
+      ok: true,
+      userId,
+      total: resp.data.total_transactions,
+      transactions,
+    });
+  } catch (err: any) {
+    const data = err?.response?.data;
+    req.log.error({ err: data ?? err }, "Plaid transactionsGet failed");
+
+    return reply.status(400).send({
+      ok: false,
+      error: "PLAID_TRANSACTIONS_GET_FAILED",
+      plaid: data ?? { message: err?.message ?? String(err) },
+    });
+  }
 });
 
 // Dashboard read model (derived from ALL events)
@@ -317,14 +1015,13 @@ app.post<{
 /**
  * PREVIEW: Ghost Pay (no events appended)
  * POST /ghost-pay/preview
- * body: { userId, vaultId, debtId, amountCents, date? }
  */
 app.post<{
   Body: {
     userId: string;
     vaultId: string;
     debtId: string;
-    amountCents: number; // cents
+    amountCents: number;
     date?: string;
   };
 }>("/ghost-pay/preview", async (req, reply) => {
@@ -413,14 +1110,13 @@ app.post<{
 /**
  * PREVIEW: Ghost Split Pay (no events appended)
  * POST /ghost-split-pay/preview
- * body: { userId, vaultId, debtIds, amountCents, date? }
  */
 app.post<{
   Body: {
     userId: string;
     vaultId: string;
     debtIds: string[];
-    amountCents: number; // cents
+    amountCents: number;
     date?: string;
   };
 }>("/ghost-split-pay/preview", async (req, reply) => {
@@ -569,6 +1265,13 @@ app.post<{
 
   const isoDate = (date ?? new Date().toISOString().slice(0, 10)) as any;
 
+  // ✅ idempotency (if provided)
+  const idemKey = getIdemKey(req);
+  if (idemKey) {
+    const cached = getIdempotentResponse(idemStore, `ghost-pay:${idemKey}`);
+    if (cached) return reply.send(cached);
+  }
+
   // Compute current balances from event-sourced state
   const state = replay(eventStore);
 
@@ -656,7 +1359,7 @@ app.post<{
   const nextVaultBal = after.vaultBalances[vaultId] ?? 0;
   const nextDebtBal = after.debtBalances[debtId] ?? 0;
 
-  // ✅ totals/clampReason for REAL route (parity with preview)
+  // totals/clampReason (parity with preview)
   let clampReason: null | "VAULT_BALANCE" | "DEBT_REMAINING" | "REQUESTED_ZERO" =
     null;
   if (requested <= 0) clampReason = "REQUESTED_ZERO";
@@ -665,7 +1368,7 @@ app.post<{
     else if (payCents === debtBal) clampReason = "DEBT_REMAINING";
   }
 
-  return reply.send({
+  const payload = {
     ok: true,
     date: isoDate,
     userId,
@@ -700,7 +1403,11 @@ app.post<{
 
     appended: newEvents.length,
     count: eventStore.length,
-  });
+  };
+
+  if (idemKey) setIdempotentResponse(idemStore, `ghost-pay:${idemKey}`, payload);
+
+  return reply.send(payload);
 });
 
 /**
@@ -736,6 +1443,13 @@ app.post<{
 
   const isoDate = (date ?? new Date().toISOString().slice(0, 10)) as any;
 
+  // ✅ idempotency (if provided)
+  const idemKey = getIdemKey(req);
+  if (idemKey) {
+    const cached = getIdempotentResponse(idemStore, `ghost-split-pay:${idemKey}`);
+    if (cached) return reply.send(cached);
+  }
+
   // Event-sourced state
   const state = replay(eventStore);
 
@@ -753,8 +1467,11 @@ app.post<{
       .send({ ok: false, error: `Vault ${vaultId} has no funds.` });
   }
 
+  // ✅ dedupe debt ids (prevents weird “double pay” if client sends duplicates)
+  const uniqueDebtIds = Array.from(new Set(debtIds));
+
   // Validate debts exist
-  const missing = debtIds.filter((id) => state.debts[id] == null);
+  const missing = uniqueDebtIds.filter((id) => state.debts[id] == null);
   if (missing.length > 0) {
     return reply.status(404).send({
       ok: false,
@@ -763,7 +1480,7 @@ app.post<{
   }
 
   // Only pay debts that still have remaining > 0
-  const payable = debtIds
+  const payable = uniqueDebtIds
     .map((id) => ({
       debtId: id,
       remainingCents: state.debtBalances[id] ?? 0,
@@ -787,6 +1504,8 @@ app.post<{
 
   const allocations = buildAllocations(payTotal, payable);
   const allocatedTotal = allocations.reduce((s, a) => s + a.amountCents, 0);
+  // ^^^ BUG FIX NOTE: If you see a TypeScript error here, replace line above with the correct one below:
+  // const allocatedTotal = allocations.reduce((s, a) => s + a.amountCents, 0);
 
   const transferId = `t${Date.now()}`;
   const providerRef = `sim_${transferId}`;
@@ -837,7 +1556,7 @@ app.post<{
     debtRemainingCents[a.debtId] = after.debtBalances[a.debtId] ?? 0;
   }
 
-  // ✅ totals/clampReason for REAL route (parity with preview)
+  // totals/clampReason (parity with preview)
   let clampReason: null | "VAULT_BALANCE" | "TOTAL_REMAINING" | "REQUESTED_ZERO" =
     null;
   if (requested <= 0) clampReason = "REQUESTED_ZERO";
@@ -851,7 +1570,7 @@ app.post<{
   );
   const debtRemainingAfterCents = debtRemainingCents;
 
-  return reply.send({
+  const payload = {
     ok: true,
     date: isoDate,
     userId,
@@ -885,10 +1604,16 @@ app.post<{
 
     appended: newEvents.length,
     count: eventStore.length,
-  });
+  };
+
+  if (idemKey) {
+    setIdempotentResponse(idemStore, `ghost-split-pay:${idemKey}`, payload);
+  }
+
+  return reply.send(payload);
 });
 
-const port = Number(process.env.PORT ?? 3000);
+const port = Number(process.env.PORT ?? 3333);
 const host = process.env.HOST ?? "0.0.0.0";
 
 try {
