@@ -24,3 +24,7 @@ coverage/
 *.swo
 data/
 ghost-savings-app/
+
+# local secrets
+secrets/
+.tmp-scripts/
