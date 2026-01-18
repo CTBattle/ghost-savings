@@ -25,7 +25,7 @@ import {
   setIdempotentResponse,
 } from "./idempotencyFile.js";
 
-import { plaid } from "../infra/plaid/plaidClient.js";
+import { getPlaidClient } from "../infra/plaid/plaidClient.js";
 
 import type { Products, CountryCode } from "plaid";
 import { upsertPlaidToken, getPlaidToken } from "./plaidTokenFile.js";
@@ -229,7 +229,7 @@ app.get("/ping", async () => {
  */
 app.post("/plaid/link-token", async (req, reply) => {
   try {
-    const resp = await plaid.linkTokenCreate({
+    const resp = await getPlaidClient().linkTokenCreate({
       user: { client_user_id: "default" },
       client_name: "Ghost Savings",
       products: ["transactions"] as Products[],
@@ -269,7 +269,7 @@ app.post("/plaid/exchange-public-token", async (req, reply) => {
       });
     }
 
-    const resp = await plaid.itemPublicTokenExchange({ public_token });
+    const resp = await getPlaidClient().itemPublicTokenExchange({ public_token });
 
     // ⚠️ Replace this with your real user id once you wire auth (Firebase idToken -> uid)
     const userId = "default";
@@ -319,7 +319,7 @@ app.post<{
       });
     }
 
-    const resp = await plaid.itemPublicTokenExchange({ public_token });
+    const resp = await getPlaidClient().itemPublicTokenExchange({ public_token });
 
     const userId = req.user!.uid;
 
@@ -375,7 +375,7 @@ app.get("/plaid/accounts", async (req, reply) => {
       });
     }
 
-    const resp = await plaid.accountsGet({ access_token });
+    const resp = await getPlaidClient().accountsGet({ access_token });
 
 // AUTO-MAP: ensure every Plaid account has a vault mapping
 for (const a of resp.data.accounts) {
@@ -530,7 +530,7 @@ app.post<{
       });
     }
 
-    const resp = await plaid.transactionsGet({
+    const resp = await getPlaidClient().transactionsGet({
       access_token,
       start_date: start,
       end_date: end,
@@ -797,7 +797,7 @@ app.get("/plaid/transactions", async (req, reply) => {
     const start_date = new Date();
     start_date.setDate(end_date.getDate() - 30);
 
-    const resp = await plaid.transactionsGet({
+    const resp = await getPlaidClient().transactionsGet({
       access_token,
       start_date: start_date.toISOString().slice(0, 10),
       end_date: end_date.toISOString().slice(0, 10),
