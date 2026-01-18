@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Boot server + health
+        env:
+          PORT: 8080
+        run: |
+          npm run dev -- --port 8080 &
+          PID=$!
+          sleep 2
+          curl -fsS "http://127.0.0.1:8080/health" | jq .
+          kill $PID
