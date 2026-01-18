@@ -4,16 +4,17 @@ on:
   pull_request:
   push:
     branches: [main]
-
+  
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
+    
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
@@ -28,6 +29,11 @@ jobs:
         env:
           PORT: 8080
         run: |
+          # Prevent Plaid env vars from breaking CI
+          unset PLAID_CLIENT_ID
+          unset PLAID_SECRET
+          unset PLAID_ENV
+
           set -euo pipefail
           npm run dev -- --port 8080 &
           PID=$!
@@ -42,3 +48,4 @@ jobs:
           echo "Health check never became ready"
           kill $PID || true
           exit 1
+
