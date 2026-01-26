@@ -1,0 +1,214 @@
+import { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  ScrollView,
+  Text,
+  View,
+  Pressable,
+} from "react-native";
+import { getDashboard, startChallenge } from "../../lib/api";
+
+type Dashboard = {
+  vaults: { id: string; name: string; kind: "SAVINGS" | "DEBT"; balanceCents: number }[];
+  debts: { id: string; name: string; balanceCents: number; remainingCents: number; minimumPaymentCents: number }[];
+  challenges: { id: string; startDate: string; startAmountCents: number; weekIndex: number; status: string; totalSavedCents: number }[];
+  pendingTransfers: any[];
+};
+
+const money = (cents: number) =>
+  `$${(Math.round((cents ?? 0)) / 100).toFixed(2)}`;
+
+export default function HomeScreen() {
+  const [data, setData] = useState<Dashboard | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = async () => {
+    setError(null);
+    try {
+      const d = await getDashboard();
+      setData(d);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  };
+
+  if (error) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "#fff", padding: 24, gap: 12 }}>
+        <Text style={{ fontSize: 22, fontWeight: "900" }}>Dashboard</Text>
+        <Text style={{ color: "#b00020", fontWeight: "700" }}>Error</Text>
+        <Text selectable>{error}</Text>
+
+        <Pressable
+          onPress={load}
+          style={{
+            marginTop: 8,
+            paddingVertical: 12,
+            paddingHorizontal: 14,
+            borderRadius: 12,
+            borderWidth: 1,
+            alignSelf: "flex-start",
+          }}
+        >
+          <Text style={{ fontWeight: "800" }}>Retry</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  if (!data) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "#fff", padding: 24, gap: 12 }}>
+        <Text style={{ fontSize: 22, fontWeight: "900" }}>Dashboard</Text>
+        <ActivityIndicator />
+        <Text>Loading…</Text>
+      </View>
+    );
+  }
+
+  const totalDebt = data.debts.reduce((sum, d) => sum + (d.remainingCents ?? 0), 0);
+  const totalSaved = data.challenges.reduce((sum, c) => sum + (c.totalSavedCents ?? 0), 0);
+
+  return (
+    <ScrollView
+      style={{ flex: 1, backgroundColor: "#fff" }}
+      contentContainerStyle={{ padding: 24, gap: 18 }}
+    >
+      <View style={{ gap: 6 }}>
+        <Text style={{ fontSize: 28, fontWeight: "900" }}>Dashboard</Text>
+        <Text style={{ color: "#444" }}>
+          Saved: {money(totalSaved)} • Debt: {money(totalDebt)}
+        </Text>
+
+        <Pressable
+          onPress={onRefresh}
+          style={{
+            marginTop: 8,
+            paddingVertical: 10,
+            paddingHorizontal: 14,
+            borderRadius: 12,
+            borderWidth: 1,
+            alignSelf: "flex-start",
+            opacity: refreshing ? 0.6 : 1,
+          }}
+          disabled={refreshing}
+        >
+          <Text style={{ fontWeight: "800" }}>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </Text>
+        </Pressable>
+      </View>
+
+      <Section title="Vaults">
+        {data.vaults.map((v) => (
+          <Card key={v.id}>
+            <Row>
+              <Text style={{ fontSize: 16, fontWeight: "800" }}>{v.name}</Text>
+              <Pill text={v.kind} />
+            </Row>
+            <Text style={{ marginTop: 6, fontSize: 18, fontWeight: "900" }}>
+              {money(v.balanceCents)}
+            </Text>
+          </Card>
+        ))}
+      </Section>
+
+      <Section title="Debts">
+        {data.debts.map((d) => (
+          <Card key={d.id}>
+            <Text style={{ fontSize: 16, fontWeight: "800" }}>{d.name}</Text>
+            <Text style={{ marginTop: 6, fontSize: 18, fontWeight: "900" }}>
+              Remaining: {money(d.remainingCents)}
+            </Text>
+            <Text style={{ marginTop: 4, color: "#444" }}>
+              Balance: {money(d.balanceCents)} • Min: {money(d.minimumPaymentCents)}
+            </Text>
+          </Card>
+        ))}
+      </Section>
+
+      <Section title="Challenges">
+        {data.challenges.map((c) => (
+          <Card key={c.id}>
+            <Row>
+              <Text style={{ fontSize: 16, fontWeight: "800" }}>{c.id}</Text>
+              <Pill text={c.status} />
+            </Row>
+            <Text style={{ marginTop: 6, fontSize: 18, fontWeight: "900" }}>
+              Saved: {money(c.totalSavedCents)}
+            </Text>
+            <Text style={{ marginTop: 4, color: "#444" }}>
+              Start: {c.startDate} • Week: {c.weekIndex} • Start Amount: {money(c.startAmountCents)}
+            </Text>
+          </Card>
+        ))}
+      </Section>
+    </ScrollView>
+  );
+}
+
+function Section({ title, children }: { title: string; children: any }) {
+  return (
+    <View style={{ gap: 10 }}>
+      <Text style={{ fontSize: 20, fontWeight: "900" }}>{title}</Text>
+      {children}
+    </View>
+  );
+}
+
+function Card({ children }: { children: any }) {
+  return (
+    <View
+      style={{
+        borderWidth: 1,
+        borderRadius: 16,
+        padding: 14,
+        gap: 6,
+      }}
+    >
+      {children}
+    </View>
+  );
+}
+
+function Row({ children }: { children: any }) {
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        justifyContent: "space-between",
+        alignItems: "center",
+        gap: 10,
+      }}
+    >
+      {children}
+    </View>
+  );
+}
+
+function Pill({ text }: { text: string }) {
+  return (
+    <View
+      style={{
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        borderRadius: 999,
+        borderWidth: 1,
+      }}
+    >
+      <Text style={{ fontSize: 12, fontWeight: "800" }}>{text}</Text>
+    </View>
+  );
+}
+

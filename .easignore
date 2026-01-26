@@ -1,0 +1,49 @@
+# dependencies
+node_modules/
+node_modules__OLD__*/
+
+# secrets
+.env
+.env.*
+secrets/
+*.pem
+*.p12
+*.mobileprovision
+
+# git
+.git/
+.gitignore
+
+# caches / logs
+.expo/
+.expo-shared/
+.cache/
+tmp/
+temp/
+npm-cache/
+yarn-cache/
+*.log
+expo-metro.log
+expo-metro.pid
+
+# editor/system
+.vscode/
+.DS_Store
+
+# build outputs
+dist/
+build/
+ios/build/
+ios/DerivedData/
+ios/Pods/
+android/.gradle/
+android/build/
+android/app/build/
+
+# optional tests/docs
+**/__tests__/
+**/*.test.*
+docs/
+
+# backend (not needed for mobile build)
+backend/
