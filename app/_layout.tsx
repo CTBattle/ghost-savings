@@ -1,6 +1,7 @@
 import React from "react";
 import { Stack } from "expo-router";
 import { AuthProvider } from "../src/auth/AuthProvider";
+import { View, Text, ScrollView } from "react-native";
 
 // TEMP DEBUG: capture fatal JS errors (works in TestFlight too)
 const originalHandler =
@@ -40,9 +41,34 @@ class ErrorBoundary extends React.Component<
 
   render() {
     if (this.state.hasError) {
-      // Minimal fallback so app doesn't hard-crash due to render tree error
-      return null;
+      const message =
+        this.state.error?.message ?? String(this.state.error ?? "Unknown error");
+      const stack = this.state.error?.stack ?? "";
+
+      // ✅ Visible fallback so "silent quits" become obvious in TestFlight
+      return (
+        <View style={{ flex: 1, padding: 24, justifyContent: "center" }}>
+          <Text style={{ fontSize: 20, fontWeight: "700", marginBottom: 8 }}>
+            Boot Error (ErrorBoundary)
+          </Text>
+          <Text style={{ marginBottom: 12 }} selectable>
+            {message}
+          </Text>
+
+          {!!stack && (
+            <ScrollView style={{ maxHeight: 280 }}>
+              <Text selectable>{stack}</Text>
+            </ScrollView>
+          )}
+
+          <Text style={{ marginTop: 16, opacity: 0.7 }}>
+            If you see this screen, the app is launching, but something threw
+            during startup. Screenshot this and send it.
+          </Text>
+        </View>
+      );
     }
+
     return this.props.children;
   }
 }
