@@ -1,23 +1,22 @@
-// lib/firebase.ts
 import { initializeApp, getApps, getApp } from "firebase/app";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   initializeAuth,
+  getAuth,
   getReactNativePersistence,
   Auth,
 } from "firebase/auth";
 
 function mustGetEnv(name: string): string {
-  const v = process.env[name];
-  if (!v || typeof v !== "string") {
-    throw new Error(
-      `Missing env var: ${name}. Check your app config / .env and restart Expo (-c).`
-    );
+  const value = process.env[name];
+
+  if (!value || typeof value !== "string" || value.trim() === "") {
+    throw new Error(`Missing env var: ${name}`);
   }
-  return v;
+
+  return value;
 }
 
-// ✅ Firebase Web config (must be real strings)
 const firebaseConfig = {
   apiKey: mustGetEnv("EXPO_PUBLIC_FIREBASE_API_KEY"),
   authDomain: mustGetEnv("EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"),
@@ -30,16 +29,14 @@ const firebaseConfig = {
 export const firebaseApp =
   getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
-// ✅ React Native persistence (prevents logout on app close)
 let auth: Auth;
+
 try {
   auth = initializeAuth(firebaseApp, {
     persistence: getReactNativePersistence(AsyncStorage),
   });
-} catch (e: any) {
-  // If initializeAuth was already called (Fast Refresh / dev reload), fall back
-  // to the existing instance attached to the app.
-  auth = (firebaseApp as any)._auth;
+} catch {
+  auth = getAuth(firebaseApp);
 }
 
 export { auth };
