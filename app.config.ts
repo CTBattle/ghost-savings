@@ -7,8 +7,8 @@ const config: ExpoConfig = {
   orientation: "portrait",
   userInterfaceStyle: "automatic",
 
-  // ✅ IMPORTANT: Enable New Architecture to match the native iOS project / pods
-  newArchEnabled: true,
+  // ❗ Disable New Architecture (fixes EXC_BAD_ACCESS startup crash)
+  newArchEnabled: false,
 
   icon: "./assets/images/icon.png",
   scheme: "budgetly",
@@ -16,8 +16,6 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: "com.charlesbattle.budgetly",
     supportsTablet: true,
-    // buildNumber intentionally omitted:
-    // iOS native project + EAS remote versioning control this
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,
     },
