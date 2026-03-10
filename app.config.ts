@@ -7,8 +7,8 @@ const config: ExpoConfig = {
   orientation: "portrait",
   userInterfaceStyle: "automatic",
 
-  // ✅ IMPORTANT: Disable New Architecture to avoid launch-crashes with some native libs (e.g., Plaid)
-  newArchEnabled: false,
+  // ✅ IMPORTANT: Enable New Architecture to match the native iOS project / pods
+  newArchEnabled: true,
 
   icon: "./assets/images/icon.png",
   scheme: "budgetly",
