@@ -7,7 +7,7 @@ const config: ExpoConfig = {
   orientation: "portrait",
   userInterfaceStyle: "automatic",
 
-  // ✅ IMPORTANT: Enable New Architecture to match the native iOS project / pods
+  // Keep New Architecture ON (required for Reanimated 4)
   newArchEnabled: true,
 
   icon: "./assets/images/icon.png",
@@ -16,8 +16,6 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: "com.charlesbattle.budgetly",
     supportsTablet: true,
-    // buildNumber intentionally omitted:
-    // iOS native project + EAS remote versioning control this
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,
     },
@@ -57,7 +55,6 @@ const config: ExpoConfig = {
 
   experiments: {
     typedRoutes: true,
-    reactCompiler: true,
   },
 
   extra: {
