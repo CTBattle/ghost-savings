@@ -8,7 +8,7 @@ const config: ExpoConfig = {
   userInterfaceStyle: "automatic",
 
   // ✅ IMPORTANT: Enable New Architecture to match the native iOS project / pods
-  newArchEnabled: true,
+  newArchEnabled: false,
 
   icon: "./assets/images/icon.png",
   scheme: "budgetly",
