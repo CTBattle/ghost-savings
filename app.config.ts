@@ -9,6 +9,7 @@ const config: ExpoConfig = {
 
   // ✅ IMPORTANT: Enable New Architecture to match the native iOS project / pods
   newArchEnabled: false,
+  jsEngine: "jsc",
 
   icon: "./assets/images/icon.png",
   scheme: "budgetly",
